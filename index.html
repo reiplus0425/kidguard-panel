@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light dark">
+<title>KidGuard 설정</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="panel.css">
+</head>
+<body>
+<div id="app"><p class="loading">불러오는 중…</p></div>
+<footer id="bar" class="bar" hidden>
+  <p class="bar-help">저장하면 텔레그램에 '이렇게 바꿀까요?' 확인 메시지가 옵니다. [적용]을 눌러야 노트북에 적용됩니다.</p>
+  <p id="bar-msg" class="bar-msg" hidden></p>
+  <div class="bar-row">
+    <span id="bar-count" class="bar-count">바뀐 항목 없음</span>
+    <button id="bar-save" class="btn-save" type="button" disabled>저장</button>
+  </div>
+</footer>
+<noscript><p class="loading">이 화면은 텔레그램의 /settings 버튼으로 열어 주세요.</p></noscript>
+<script src="core.js"></script>
+<script src="panel.js"></script>
+</body>
+</html>

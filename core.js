@@ -13,18 +13,28 @@
 
   // ---------- 주소(#) 읽기 ----------
 
-  // # 뒤 글에서 "kg1." 로 시작하는 조각을 & 또는 ? 앞까지 꺼낸다 ("kg1." 은 뺀다). 없으면 null.
-  function extractKg1(hash) {
+  // # 뒤 글에서 tag(예: "kg1.") 로 시작하는 조각을 & 또는 ? 앞까지 꺼낸다 (tag 는 뺀다). 없으면 null.
+  function extractTag(hash, tag) {
     if (typeof hash !== "string") return null;
     var s = hash.charAt(0) === "#" ? hash.slice(1) : hash;
     var pieces = s.split(/[&?]/);
     for (var i = 0; i < pieces.length; i++) {
-      if (pieces[i].indexOf("kg1.") === 0) {
-        var body = pieces[i].slice(4);
+      if (pieces[i].indexOf(tag) === 0) {
+        var body = pieces[i].slice(tag.length);
         return /^[A-Za-z0-9_-]+$/.test(body) ? body : null;
       }
     }
     return null;
+  }
+  function extractKg1(hash) { return extractTag(hash, "kg1."); }
+  function extractKg2(hash) { return extractTag(hash, "kg2."); }
+
+  // 화면 값 조각: {kind: "kg2" | "kg1", body} 또는 null. 새 모양(kg2)을 먼저 본다.
+  function extractLaunch(hash) {
+    var b = extractKg2(hash);
+    if (b) return { kind: "kg2", body: b };
+    b = extractKg1(hash);
+    return b ? { kind: "kg1", body: b } : null;
   }
 
   // # 뒤 글의 key=value 값 하나 (URL 인코딩 풀어서). 없으면 null.
@@ -122,14 +132,50 @@
     return pump();
   }
 
+  var GENERIC_PROBLEM = "설정 값을 읽지 못했습니다. 텔레그램에서 /settings 를 다시 보내 주세요.";
+
   // 받은 값의 공통 부분 검사. 문제가 있으면 부모에게 보여 줄 글, 없으면 null.
   function checkLaunch(d) {
-    if (!d || typeof d !== "object") return "설정 값을 읽지 못했습니다. 텔레그램에서 /settings 를 다시 보내 주세요.";
+    if (!d || typeof d !== "object") return GENERIC_PROBLEM;
     if (d.v !== 1) return "노트북 프로그램과 설정 화면의 버전이 맞지 않습니다. 노트북의 KidGuard 를 최신으로 바꾼 뒤 /settings 를 다시 보내 주세요.";
     if (SECTIONS.indexOf(d.sec) < 0) return "알 수 없는 설정 구역입니다. 텔레그램에서 /settings 를 다시 보내 주세요.";
-    if (typeof d.sid !== "string" || !/^[0-9a-f]{16}$/.test(d.sid)) return "설정 값을 읽지 못했습니다. 텔레그램에서 /settings 를 다시 보내 주세요.";
+    if (typeof d.sid !== "string" || !/^[0-9a-f]{16}$/.test(d.sid)) return GENERIC_PROBLEM;
     if (d.sec !== "opts" && (typeof d.u !== "string" || !d.u)) return "아이 정보가 없습니다. 텔레그램에서 /settings 를 다시 보내 주세요.";
     return null;
+  }
+
+  // ---------- kg2 (v0.7.1, 설계 §7.2): 구역 여러 개 ----------
+
+  // kg2 의 공통 부분 검사. 문제가 있으면 부모에게 보여 줄 글, 없으면 null.
+  function checkLaunch2(d) {
+    if (!d || typeof d !== "object") return GENERIC_PROBLEM;
+    if (d.v !== 2) return "노트북 프로그램과 설정 화면의 버전이 맞지 않습니다. 노트북의 KidGuard 를 최신으로 바꾼 뒤 /settings 를 다시 보내 주세요.";
+    if (!Array.isArray(d.secs) || !d.secs.length) return GENERIC_PROBLEM;
+    return null;
+  }
+
+  // kg2 값 → 구역마다 예전(v1) 모양 {v:1, at, pc, u, n, …항목}. 잘못된 항목·같은 구역 두 번째는 빼고 problems 에 적는다.
+  // 결과: {secs: [구역 값 (SECTIONS 순서)], problems: [글]}
+  function splitLaunch2(d) {
+    var out = [], problems = [], seen = {};
+    var list = Array.isArray(d && d.secs) ? d.secs.slice(0, 8) : [];
+    list.forEach(function (item, i) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) { problems.push("구역 " + (i + 1) + ": 형식이 잘못되었습니다"); return; }
+      var o = { v: 1, at: d.at, pc: d.pc, u: d.u, n: d.n };
+      Object.keys(item).forEach(function (k) {
+        if (k === "__proto__") return; // JSON 의 "__proto__" 키는 자기 값이지만 객체에 넣으면 프로토타입이 바뀐다
+        o[k] = item[k];
+      });
+      o.v = 1;
+      if (o.sec === "time" && o.today === undefined && typeof d.today === "string") o.today = d.today;
+      var p = checkLaunch(o);
+      if (p) { problems.push("구역 " + (i + 1) + ": " + p); return; }
+      if (seen[o.sec]) { problems.push("구역 " + (i + 1) + ": 같은 구역이 두 번 있습니다"); return; }
+      seen[o.sec] = true;
+      out.push(o);
+    });
+    out.sort(function (a, b) { return SECTIONS.indexOf(a.sec) - SECTIONS.indexOf(b.sec); });
+    return { secs: out, problems: problems };
   }
 
   // ---------- 작은 도우미 ----------
@@ -192,6 +238,16 @@
   var FORMAT_CHAR = (function () {
     try { return new RegExp("\\p{Cf}", "u"); } catch (e) { return /[\u00ad\u0600-\u0605\u061c\u06dd\u070f\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb]/; }
   })();
+
+  // 보이지 않는 서식 글자 전부 (화면에 보여 줄 때 ? 로 바꾼다. 예: U+202E 는 글 방향을 뒤집어 이름을 속일 수 있다)
+  var FORMAT_CHARS = (function () {
+    try { return new RegExp("\\p{Cf}", "gu"); } catch (e) { return new RegExp(FORMAT_CHAR.source, "g"); }
+  })();
+
+  // 받은 글(앱 이름·사이트·아이 이름 등)을 보여 줄 모양으로: 제어 문자·서식 글자 → ?
+  function safeText(v) {
+    return String(v === undefined || v === null ? "" : v).replace(/[\u0000-\u001f\u007f-\u009f]/g, "?").replace(FORMAT_CHARS, "?");
+  }
 
   // 사이트 하나 검사. 문제가 있으면 글, 없으면 null.
   function siteProblem(s) {
@@ -366,8 +422,8 @@
 
   function appName(d, id) {
     var apps = d && Array.isArray(d.apps) ? d.apps : [];
-    for (var i = 0; i < apps.length; i++) if (apps[i] && apps[i].id === id) return String(apps[i].n || id);
-    return id;
+    for (var i = 0; i < apps.length; i++) if (apps[i] && apps[i].id === id) return safeText(apps[i].n || id);
+    return safeText(id);
   }
 
   // 바뀐 것 전체 검사 → {키: 글} (문제 없으면 빈 객체).
@@ -487,17 +543,181 @@
     return unescape(encodeURIComponent(s)).length;
   }
 
+  var TOO_MUCH = "한 번에 바꾼 것이 너무 많습니다. 일부만 먼저 저장하고, /settings 로 다시 열어 나머지를 바꿔 주세요.";
+
+  // v1 글 객체 (§4). v2 의 items 하나도 같은 모양.
+  function payloadObject(d, ch) {
+    return { v: 1, sid: d.sid, sec: d.sec, u: d.sec === "opts" ? "" : String(d.u || ""), ch: ch };
+  }
+
   // 보낼 글을 만든다. {text, bytes, error}. error 가 있으면 보내지 않는다.
   function buildPayload(d, ch) {
     var keys = Object.keys(ch);
     if (!keys.length) return { text: "", bytes: 0, error: "바뀐 것이 없습니다." };
-    var obj = { v: 1, sid: d.sid, sec: d.sec, u: d.sec === "opts" ? "" : String(d.u || ""), ch: ch };
-    var text = JSON.stringify(obj);
+    var text = JSON.stringify(payloadObject(d, ch));
     var bytes = utf8Length(text);
-    if (keys.length > MAX_KEYS || bytes > MAX_BYTES) {
-      return { text: text, bytes: bytes, error: "한 번에 바꾼 것이 너무 많습니다. 일부만 먼저 저장하고, /settings 로 다시 열어 나머지를 바꿔 주세요." };
-    }
+    if (keys.length > MAX_KEYS || bytes > MAX_BYTES) return { text: text, bytes: bytes, error: TOO_MUCH };
     return { text: text, bytes: bytes, error: null };
+  }
+
+  // 여러 구역을 한 번에 (§7.4): list = [{d: 구역 값, ch: 바뀐 키}] → {"v":2,"items":[v1 객체…]}.
+  // 바뀐 것이 없는 구역은 뺀다. {text, bytes, error, secs}.
+  function buildPayload2(list) {
+    var items = [], secs = [], error = null;
+    (list || []).forEach(function (x) {
+      if (!x || !x.d || !x.ch || !Object.keys(x.ch).length) return;
+      if (secs.indexOf(x.d.sec) >= 0) { error = "같은 구역을 두 번 보낼 수 없습니다."; return; }
+      if (Object.keys(x.ch).length > MAX_KEYS) error = TOO_MUCH;
+      secs.push(x.d.sec);
+      items.push(payloadObject(x.d, x.ch));
+    });
+    if (!items.length) return { text: "", bytes: 0, error: "바뀐 것이 없습니다.", secs: [] };
+    if (items.length > SECTIONS.length && !error) error = TOO_MUCH;
+    var text = JSON.stringify({ v: 2, items: items });
+    var bytes = utf8Length(text);
+    if (bytes > MAX_BYTES) error = TOO_MUCH;
+    return { text: text, bytes: bytes, error: error, secs: secs };
+  }
+
+  // 최신 값 받기 (§7.4)
+  var REFRESH_TEXT = JSON.stringify({ v: 2, rf: 1 });
+
+  // ---------- 최신 값 알리기 (§7.5) ----------
+
+  // "10-08 08:49" → "08:49" (모르면 "?")
+  function atClock(at) {
+    if (typeof at !== "string") return "?";
+    var m = /(\d{2}:\d{2})\s*$/.exec(at);
+    return m ? m[1] : "?";
+  }
+
+  // 받은 값의 나이. nowSec = 휴대폰 시계 (유닉스 초).
+  // 결과: {state: "green"|"yellow"|"red"|"none", text, canSave, age (초)}. ts 가 없으면(kg1) "none".
+  function freshness(at, ts, life, nowSec) {
+    var clock = atClock(at);
+    if (!isInt(ts) || ts <= 0 || typeof nowSec !== "number" || !isFinite(nowSec)) {
+      return { state: "none", text: clock + " 노트북 값", canSave: true, age: null };
+    }
+    var lifeMin = isInt(life) && life > 0 && life <= 1440 ? life : 30;
+    var age = Math.max(0, Math.floor(nowSec - ts));
+    if (age < 120) return { state: "green", text: "📸 " + clock + " 노트북 값 · 방금 받음", canSave: true, age: age };
+    if (age <= lifeMin * 60) {
+      return { state: "yellow", text: "📸 " + clock + " 노트북 값 · " + fmtDuration(Math.floor(age / 60)) + " 전 – 지금 노트북 설정과 다를 수 있습니다", canSave: true, age: age };
+    }
+    return { state: "red", text: "이 버튼은 시간이 지나 저장할 수 없습니다", canSave: false, age: age };
+  }
+
+  // ---------- 기록 값 (§7.3) ----------
+  // 받은 값은 모두 믿지 않는다: 모양이 틀린 줄은 빼고, 숫자는 범위 안으로, 글은 잘라서 제어 문자는 ? 로.
+
+  var REP_MAX = 100000000; // 초·분 최대 (그보다 크면 잘라 보여 줌)
+  var KIND_NAMES = { t: "오늘", y: "어제", w: "최근 7일" };
+
+  function repInt(v, max) { return isInt(v) && v >= 0 ? Math.min(v, max || REP_MAX) : 0; }
+  function repIntOrNull(v, max) { return isInt(v) && v >= 0 ? Math.min(v, max || REP_MAX) : null; }
+  function repStr(v, max) {
+    if (typeof v !== "string") return null;
+    return safeText(v).slice(0, max);
+  }
+  function repList(v, max, fn) {
+    var out = [];
+    if (!Array.isArray(v)) return out;
+    for (var i = 0; i < v.length && out.length < max; i++) {
+      var x = Array.isArray(v[i]) ? fn(v[i]) : null;
+      if (x) out.push(x);
+    }
+    return out;
+  }
+
+  function normPeriod(p) {
+    if (!p || typeof p !== "object" || !Object.prototype.hasOwnProperty.call(KIND_NAMES, p.k)) return null;
+    var chg = isInt(p.chg) ? Math.max(-100000, Math.min(100000, p.chg)) : null;
+    var named = function (a) { var n = repStr(a[0], 253); return n ? { n: n, s: repInt(a[1]), p: repInt(a[2]) } : null; };
+    var heat = [];
+    if (Array.isArray(p.heat)) {
+      p.heat.slice(0, 7).forEach(function (row) {
+        if (!Array.isArray(row)) return;
+        var r = [];
+        for (var h = 0; h < 24; h++) r.push(repInt(row[h], 100000));
+        heat.push(r);
+      });
+    }
+    return {
+      k: p.k,
+      nm: repStr(p.nm, 20) || KIND_NAMES[p.k],
+      f: repStr(p.f, 10) || "", to: repStr(p.to, 10) || "",
+      pn: repStr(p.pn, 30) || "지난 기간",
+      sc: repInt(p.sc), ct: repInt(p.ct), fr: repInt(p.fr), pa: repInt(p.pa), avg: repInt(p.avg),
+      chg: chg, ov: repInt(p.ov, 366), ex: repInt(p.ex), rq: repInt(p.rq, 100000), bd: repInt(p.bd), ls: repInt(p.ls),
+      e: repIntOrNull(p.e, 1439), la: repIntOrNull(p.la, 1439),
+      ins: repList(p.ins, 10, function (a) { var t = repStr(a[0], 200); return t ? { t: t, imp: a[1] === 1 } : null; }),
+      cat: repList(p.cat, 8, function (a) { var n = repStr(a[0], 60); return n ? { n: n, s: repInt(a[1]) } : null; }),
+      app: repList(p.app, 30, function (a) { var x = named(a); if (x) x.n = x.n.slice(0, 60); return x; }),
+      am: repInt(p.am, 100000),
+      site: repList(p.site, 30, named),
+      sm: repInt(p.sm, 100000),
+      days: repList(p.days, 31, function (a) {
+        var dt = repStr(a[0], 10);
+        if (!dt) return null;
+        var dow = isInt(a[1]) && a[1] >= 1 && a[1] <= 7 ? a[1] : 0;
+        return { date: dt, dow: dow, sc: repInt(a[2]), ct: repInt(a[3]), lim: repIntOrNull(a[4], 1440), over: a[5] === 1 };
+      }),
+      heat: heat,
+      vis: repList(p.vis, 100, function (a) {
+        var st = repStr(a[0], 253);
+        return st ? { s: st, f: isInt(a[1]) && a[1] >= 0 ? a[1] & 7 : 0, d: repInt(a[2], 366) } : null;
+      }),
+      vm: repInt(p.vm, 100000)
+    };
+  }
+
+  // rep → {lv, p: [기간]} 또는 null (보여 줄 기간이 없으면). 같은 기간(k) 두 번째는 뺀다.
+  function normReport(rep) {
+    if (!rep || typeof rep !== "object" || Array.isArray(rep) || !Array.isArray(rep.p)) return null;
+    var out = [], seen = {};
+    rep.p.slice(0, 6).forEach(function (p) {
+      var n = normPeriod(p);
+      if (!n || seen[n.k]) return;
+      seen[n.k] = true;
+      out.push(n);
+    });
+    return out.length ? { lv: isInt(rep.lv) ? rep.lv : 0, p: out } : null;
+  }
+
+  // 초 → "1시간 5분" / "12분" / "40초" (부모 앱 Format.Duration 과 같게)
+  function fmtSeconds(sec) {
+    var s = isInt(sec) && sec > 0 ? sec : 0;
+    if (s < 60) return s + "초";
+    return fmtDuration(Math.floor(s / 60));
+  }
+
+  // 분(하루 안) → "07:05"
+  function fmtClock(min) { return pad2(Math.floor(min / 60) % 24) + ":" + pad2(min % 60); }
+
+  // 바뀐 정도 → "+12%" / "-5%"
+  function fmtChange(pct) { return (pct >= 0 ? "+" : "") + pct + "%"; }
+
+  // 시간대 칸(0~23시)이 잠자는 시간인지: 그 시간의 30분이 잠자는 시간이면 (부모 앱 RuleEngine.InBedtime 과 같게).
+  function bedHours(bed) {
+    var out = [];
+    var e = bed && bed.e === true;
+    var s = e ? parseMinute(bed.s) : null, t = e ? parseMinute(bed.t) : null;
+    for (var h = 0; h < 24; h++) {
+      var x = h * 60 + 30;
+      if (s === null || t === null || s === t) out.push(false);
+      else out.push(s < t ? x >= s && x < t : x >= s || x < t);
+    }
+    return out;
+  }
+
+  // 방문한 사이트 표시 (부모 앱 SiteUi.Mark 와 같게). anySeen = 이 기간에 주소창으로 확인한 사이트가 있는지.
+  function visitMarks(flags, anySeen) {
+    var out = [];
+    var blocked = (flags & 2) !== 0, isNew = (flags & 1) !== 0, seen = (flags & 4) !== 0;
+    if (blocked) out.push("막힘");
+    if (isNew && (seen || !anySeen)) out.push("처음");
+    if (anySeen && !seen && !blocked) out.push("함께 불러옴");
+    return out;
   }
 
   var api = {
@@ -508,7 +728,11 @@
     fmtDuration: fmtDuration, normalizeSite: normalizeSite, cleanNewSite: cleanNewSite, siteProblem: siteProblem, normalizeSiteList: normalizeSiteList,
     MAX_JSON_BYTES: MAX_JSON_BYTES, isClock: isClock, uniq: uniq, minLimit: minLimit, intOrNull: intOrNull,
     baseValues: baseValues, clone: clone, canon: canon, diff: diff, validateKey: validateKey, validate: validate,
-    weakens: weakens, utf8Length: utf8Length, buildPayload: buildPayload
+    weakens: weakens, utf8Length: utf8Length, buildPayload: buildPayload,
+    SECTIONS: SECTIONS, safeText: safeText, extractTag: extractTag, extractKg2: extractKg2, extractLaunch: extractLaunch,
+    checkLaunch2: checkLaunch2, splitLaunch2: splitLaunch2, payloadObject: payloadObject, buildPayload2: buildPayload2,
+    REFRESH_TEXT: REFRESH_TEXT, atClock: atClock, freshness: freshness,
+    normReport: normReport, fmtSeconds: fmtSeconds, fmtClock: fmtClock, fmtChange: fmtChange, bedHours: bedHours, visitMarks: visitMarks
   };
 
   if (typeof module !== "undefined" && module.exports) module.exports = api;
